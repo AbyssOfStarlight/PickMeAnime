@@ -1,6 +1,5 @@
-# Mindustry Java Mod Template
-A Java Mindustry mod template that works on Android and PC. The Kotlin version of this mod can be seen [here](https://github.com/Anuken/MindustryKotlinModTemplate).
-
+# Mindustry Mod
+Mod based on deltanedas/pictologic to create schemes with anime arts
 ## Building for Desktop Testing
 
 1. Install JDK **17**.
