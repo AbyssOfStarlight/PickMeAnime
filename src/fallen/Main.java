@@ -44,12 +44,9 @@ public class Main extends Mod {
                 img.button(currentImage == null ? "Choose File..." : "Change Image", Icon.file, () -> {
                     Vars.platform.showFileChooser(true, "*", file -> {
                         try {
-                            String ext = file.extension().toLowerCase();
-                            if (!(ext.equals("png") || ext.equals("jpg") || ext.equals("jpeg") || ext.equals("bmp"))) {
-                                Vars.ui.showInfo("Invalid format!"); return;
-                            }
+                            Pixmap loaded = new Pixmap(file);
                             if (currentImage != null) currentImage.dispose();
-                            currentImage = new Pixmap(file);
+                            currentImage = loaded;
                             ptl.hide(); showMainDialog(); // Переоткрываем для обновления текста кнопок
                         } catch (Exception ex) { Vars.ui.showException(ex); }
                     });
