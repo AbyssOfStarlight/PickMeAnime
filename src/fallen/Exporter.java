@@ -13,14 +13,37 @@ import mindustry.world.blocks.logic.LogicBlock.*;
 public class Exporter {
 
     public static void export(Pixmap input) {
+        if (input == null) return;
         int size = Main.coreSize;
-        Pixmap pixmap = input.copy();        // Создаем рабочую копию, чтобы не трогать оригинал в Main.currentImage
+        Pixmap pixmap = new Pixmap(size, size);
         try {
             // 1. Масштабирование (если нужно)
-            if (pixmap.width != size || pixmap.height != size) {
-                Pixmap scaled = scaleLinear(pixmap, size, size);
-                pixmap.dispose(); // Удаляем старую временную копию
-                pixmap = scaled;  // Теперь рабочая копия — это отмасштабированный Pixmap
+            pixmap.fill(Color.rgba8888(0f, 0f, 0f, 1f));     // Заполняем фон черным для режима полос
+            int srcW = input.width;
+            int srcH = input.height;
+            if (Main.coreScaling == 0) {
+                pixmap.draw(input, 0, 0, srcW, srcH, 0, 0, size, size);
+
+            } else if (Main.coreScaling == 1) {
+                int srcX = 0, srcY = 0, srcPartSize;
+
+                if (srcW > srcH) { // Пейзаж
+                    srcPartSize = srcH;
+                    srcX = (srcW - srcH) / 2;
+                } else { // Портрет
+                    srcPartSize = srcW;
+                    srcY = (srcH - srcW) / 2;
+                }
+                pixmap.draw(input, srcX, srcY, srcPartSize, srcPartSize, 0, 0, size, size);
+
+            } else {
+                float ratio = Math.min((float)size / srcW, (float)size / srcH);
+                int drawW = (int)(srcW * ratio);
+                int drawH = (int)(srcH * ratio);
+                int drawX = (size - drawW) / 2;
+                int drawY = (size - drawH) / 2;
+
+                pixmap.draw(input, 0, 0, srcW, srcH, drawX, drawY, drawW, drawH);
             }
 
             // 2. Группировка прямоугольников
