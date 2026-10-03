@@ -8,60 +8,30 @@ public class Processor {
 
 
 
-    // 1. Построение глобальной палитры (вызывается 1 раз на всю картинку)
-    public static void buildGlobalPalette(Pixmap src, Seq<Integer> rgbPalette, Seq<float[]> hsvPalette) {
+    // 1. Построение глобальной палитры (вызывается 1 раз на всю картинку).
+    //    null — Quality 255, каждый цвет остаётся сам собой (палитра не нужна)
+    public static Palette buildGlobalPalette(Pixmap src) {
         int raw = 255 - Main.coreQuality;
-        int threshold = (int)(Math.pow(raw, 1.5) / 30f);
-        Color t = new Color();
+        if (raw <= 0) return null;
+        // Сливаются цвета с diff < threshold, поэтому порог 0 или 1 ничего не сливает.
+        // +2: уже на 254 сливаются соседние цвета, и каждое деление ползунка что-то меняет
+        int threshold = 2 + (int)(Math.pow(raw, 1.5) / 30f);
+
+        // Множитель 1.5 для HSV — для более тонкой настройки
+        Palette palette = new Palette(Main.coreHsv, Main.coreHsv ? (threshold / 255f) * 1.5f : threshold);
+        IntSet seen = new IntSet();
 
         for (int x = 0; x < src.width; x++) {
             for (int y = 0; y < src.height; y++) {
                 int pixel = src.get(x, y);
-                boolean found = false;
+                // Повтор цвета заведомо найдёт уже обработанную запись
+                if (!seen.add(pixel)) continue;
 
-                if (Main.coreHsv) {
-                    float hsvThreshold = (threshold / 255f) * 1.5f; // Множитель для более тонкой настройки
-
-                    t.set(pixel);
-                    float h = t.hue() / 360f;
-                    float s = t.saturation();
-                    float v = t.value();
-
-                    for (int i = 0; i < hsvPalette.size; i++) {
-                        float[] other = hsvPalette.get(i);
-                        float diff = hueDiff(h, other[0]) + Math.abs(s - other[1]) + Math.abs(v - other[2]);
-
-                        if (diff < hsvThreshold) {
-                            found = true;
-                            break;
-                        }
-                    }
-                    if (!found) {
-                        rgbPalette.add(pixel);
-                        hsvPalette.add(new float[]{h, s, v});
-                    }
-                } else {
-                    int r1 = (pixel >> 24) & 0xff;
-                    int g1 = (pixel >> 16) & 0xff;
-                    int b1 = (pixel >> 8) & 0xff;
-
-                    for (int other : rgbPalette) {
-                        int r2 = (other >> 24) & 0xff;
-                        int g2 = (other >> 16) & 0xff;
-                        int b2 = (other >> 8) & 0xff;
-                        int diff = Math.abs(r1-r2) + Math.abs(g1-g2) + Math.abs(b1-b2);
-
-                        if (diff < threshold) {
-                            found = true;
-                            break;
-                        }
-                    }
-                    if (!found) {
-                        rgbPalette.add(pixel);
-                    }
-                }
+                palette.setCoords(pixel);
+                if (palette.find(false) < 0) palette.add(pixel);
             }
         }
+        return palette;
     }
 
     private static float hueDiff(float h1, float h2) {
@@ -70,61 +40,133 @@ public class Processor {
     }
 
     // 2. Применение палитры к куску (без повторной индексации)
-    public static void applyPalette(Pixmap dst, Seq<Integer> rgbPalette, Seq<float[]> hsvPalette) {
-        if (rgbPalette.size == 0) return;
-
-        Color t = new Color();
+    public static void applyPalette(Pixmap dst, Palette palette) {
+        IntIntMap cache = new IntIntMap();
 
         for (int x = 0; x < dst.width; x++) {
             for (int y = 0; y < dst.height; y++) {
                 int pixel = dst.get(x, y);
-                int bestColor = rgbPalette.get(0);
-                float minDiff = Float.MAX_VALUE;
+                int index = cache.get(pixel, -1);
 
-                if (Main.coreHsv) {
-                    t.set(pixel);
-                    float h = t.hue() / 360f, s = t.saturation(), v = t.value();
-
-                    for (int i = 0; i < hsvPalette.size; i++) {
-                        float[] other = hsvPalette.get(i);
-                        float diff = hueDiff(h, other[0]) + Math.abs(s - other[1]) + Math.abs(v - other[2]);
-
-                        if (diff < minDiff) {
-                            minDiff = diff;
-                            bestColor = rgbPalette.get(i);
-                        }
-                    }
-                } else {
-                    int r1 = (pixel >> 24) & 0xff;
-                    int g1 = (pixel >> 16) & 0xff;
-                    int b1 = (pixel >> 8) & 0xff;
-
-                    for (int other : rgbPalette) {
-                        int r2 = (other >> 24) & 0xff;
-                        int g2 = (other >> 16) & 0xff;
-                        int b2 = (other >> 8) & 0xff;
-
-                        int diff = Math.abs(r1 - r2) + Math.abs(g1 - g2) + Math.abs(b1 - b2);
-
-                        if (diff < minDiff) {
-                            minDiff = diff;
-                            bestColor = other;
-                        }
-                    }
+                if (index < 0) {
+                    palette.setCoords(pixel);
+                    index = palette.find(true);
+                    cache.put(pixel, index);
                 }
-                dst.set(x, y, bestColor);
+                dst.set(x, y, palette.colors.get(index));
             }
         }
     }
 
+    // Палитра с пространственной сеткой (ячейка >= порога). Совпадение (diff < порог)
+    // может лежать только в соседней ячейке, поэтому вся палитра не перебирается.
+    // Результат тот же, что у полного перебора.
+    public static class Palette {
+        static final int K = 512; // > максимального индекса ячейки по оси
 
-    // 3. Только группировка прямоугольников (без индексации!)
-    public static ObjectMap<String, Seq<RectInt>> groupOnly(Pixmap pixmap) {
-        Pixmap work = new Pixmap(pixmap.width, pixmap.height);
-        work.draw(pixmap, 0, 0);
+        final boolean hsv;
+        final float threshold;
+        final int hueCells; // для HSV: оттенок закольцован, ширина ячейки 1/hueCells >= порога
+        final IntSeq colors = new IntSeq();
+        final FloatSeq coords = new FloatSeq();
+        final IntMap<IntSeq> grid = new IntMap<>();
 
-        // Альфа-блендинг (остаётся без изменений)
+        final Color t = new Color();
+        float c0, c1, c2;
+
+        Palette(boolean hsv, float threshold) {
+            this.hsv = hsv;
+            this.threshold = threshold;
+            this.hueCells = hsv ? Math.max(1, (int)(1f / threshold)) : 0;
+        }
+
+        void setCoords(int pixel) {
+            if (hsv) {
+                t.set(pixel);
+                c0 = t.hue() / 360f;
+                c1 = t.saturation();
+                c2 = t.value();
+            } else {
+                c0 = (pixel >> 24) & 0xff;
+                c1 = (pixel >> 16) & 0xff;
+                c2 = (pixel >> 8) & 0xff;
+            }
+        }
+
+        int cell0(float c) {
+            return hsv ? (int)(c * hueCells) % hueCells : (int)(c / threshold);
+        }
+
+        int cell(float c) {
+            return (int)(c / threshold);
+        }
+
+        void add(int pixel) {
+            int index = colors.size;
+            colors.add(pixel);
+            coords.add(c0, c1, c2);
+            int key = (cell0(c0) * K + cell(c1)) * K + cell(c2);
+            IntSeq bucket = grid.get(key);
+            if (bucket == null) grid.put(key, bucket = new IntSeq());
+            bucket.add(index);
+        }
+
+        float diff(int index) {
+            float[] c = coords.items;
+            float d0 = hsv ? hueDiff(c0, c[index * 3]) : Math.abs(c0 - c[index * 3]);
+            return d0 + Math.abs(c1 - c[index * 3 + 1]) + Math.abs(c2 - c[index * 3 + 2]);
+        }
+
+        // nearest = false: любая запись ближе порога; true: ближайшая (при равенстве — с меньшим индексом)
+        int find(boolean nearest) {
+            int i0 = cell0(c0), i1 = cell(c1), i2 = cell(c2);
+            int span0 = hsv && hueCells < 3 ? hueCells : 3;
+            int best = -1;
+            float bestDiff = Float.MAX_VALUE;
+
+            for (int a = 0; a < span0; a++) {
+                int n0 = !hsv ? i0 - 1 + a : hueCells < 3 ? a : (i0 - 1 + a + hueCells) % hueCells;
+                if (n0 < 0) continue;
+                for (int n1 = i1 - 1; n1 <= i1 + 1; n1++) {
+                    if (n1 < 0) continue;
+                    for (int n2 = i2 - 1; n2 <= i2 + 1; n2++) {
+                        if (n2 < 0) continue;
+                        IntSeq bucket = grid.get((n0 * K + n1) * K + n2);
+                        if (bucket == null) continue;
+
+                        for (int j = 0; j < bucket.size; j++) {
+                            int index = bucket.items[j];
+                            float d = diff(index);
+                            if (!nearest) {
+                                if (d < threshold) return index;
+                            } else if (d < bestDiff || (d == bestDiff && index < best)) {
+                                bestDiff = d;
+                                best = index;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Цвета не из исходной картинки могут не иметь соседей — полный перебор
+            if (nearest && best < 0) {
+                for (int index = 0; index < colors.size; index++) {
+                    float d = diff(index);
+                    if (d < bestDiff) {
+                        bestDiff = d;
+                        best = index;
+                    }
+                }
+            }
+            return best;
+        }
+    }
+
+    // 0. Убираем прозрачность ДО палитры, иначе прозрачный пиксель
+    //    получит альфу и цвет случайной записи палитры
+    public static void flattenAlpha(Pixmap work) {
         Color tmpColor = new Color();
+        Color gray = Color.valueOf("3d3d43");
         for (int x = 0; x < work.width; x++) {
             for (int y = 0; y < work.height; y++) {
                 int rgba = work.get(x, y);
@@ -137,7 +179,7 @@ public class Processor {
                 if (Main.coreUseGray) {
                     float oldA = tmpColor.a;
                     tmpColor.a = 1f;
-                    tmpColor.lerp(Color.valueOf("3d3d43"), 1f - oldA);
+                    tmpColor.lerp(gray, 1f - oldA);
                 } else {
                     tmpColor.r *= a;
                     tmpColor.g *= a;
@@ -147,8 +189,10 @@ public class Processor {
                 work.set(x, y, tmpColor.rgba8888());
             }
         }
+    }
 
-        // Группировка (остаётся без изменений)
+    // 3. Только группировка прямоугольников (без индексации!)
+    public static ObjectMap<String, Seq<RectInt>> groupOnly(Pixmap work) {
         int w = work.width, h = work.height;
         ObjectMap<String, Seq<RectInt>> out = new ObjectMap<>();
         used = new boolean[w * h];
@@ -167,7 +211,6 @@ public class Processor {
             }
         }
 
-        work.dispose();
         return out;
     }
 

@@ -12,6 +12,7 @@ import mindustry.gen.*;
 import mindustry.mod.*;
 import mindustry.ui.FileChooser;
 import mindustry.ui.dialogs.*;
+import mindustry.game.Schematic;
 import mindustry.world.Block;
 import mindustry.world.blocks.logic.*;
 import arc.graphics.Pixmap;
@@ -24,7 +25,6 @@ public class Main extends Mod {
     public static int coreSpeed = 996;
     public static int separateSpeed = 100;
     public static int coreQuality = 255;
-    public static int coreDOffset = 0;
     public static boolean coreHsv = false;
     public static boolean coreUseGray = false;
     public static boolean saveGenerate = Core.settings.getBool("pma-savegen", true);
@@ -33,6 +33,7 @@ public class Main extends Mod {
     public static int coreGridW = 1;
     public static int coreGridH = 1;
     public static boolean drawDisplayBorders = Core.settings.getBool("pm-ddb", false);
+    static boolean exporting = false;
 
     @Override
     public void init() {
@@ -60,7 +61,7 @@ public class Main extends Mod {
                     // Основная кнопка выбора файла
                     buttons.button(currentImage == null ? "Choose File..." : "Change Image", Icon.file, () -> {
                         // Используем новый API через FileChooser
-                        FileChooser.open("png", "jpg", "jpeg", "bmp", "webp") // Перечисляем расширения
+                        FileChooser.open("png", "jpg", "jpeg", "bmp") // Только то, что умеет stb_image (webp — нет)
                                 .title("Select Image") // Заголовок окна
                                 .submit(file -> {      // Что делать с результатом (Fi file)
                                     try {
@@ -77,23 +78,15 @@ public class Main extends Mod {
                                         Vars.ui.showException("Failed to load image", ex);
                                     }
                                 });
-                    }).size(230, 50);
+                    }).size(230, 50).disabled(b -> exporting);
 
-                    // Кнопка вставки из буфера (только для ПК)
-                    if (!Vars.mobile) {
+                    // Кнопка вставки из буфера (только для ПК; на macOS AWT рядом с окном игры может зависнуть)
+                    if (!Vars.mobile && !OS.isMac) {
                         buttons.button(Icon.copy, () -> {
                             try {
-                                // Работаем с системным буфером обмена через AWT
-                                java.awt.datatransfer.Clipboard cb = java.awt.Toolkit.getDefaultToolkit().getSystemClipboard();
-                                java.awt.datatransfer.Transferable content = cb.getContents(null);
+                                Pixmap pix = ClipboardImport.read();
 
-                                if (content != null && content.isDataFlavorSupported(java.awt.datatransfer.DataFlavor.imageFlavor)) {
-                                    // Извлекаем картинку
-                                    java.awt.Image awtImg = (java.awt.Image) content.getTransferData(java.awt.datatransfer.DataFlavor.imageFlavor);
-
-                                    // Конвертируем в Pixmap
-                                    Pixmap pix = awtToPixmap(awtImg);
-
+                                if (pix != null) {
                                     if (currentImage != null) currentImage.dispose();
                                     currentImage = pix;
 
@@ -103,10 +96,10 @@ public class Main extends Mod {
                                 } else {
                                     Vars.ui.showInfo("Clipboard doesn't contain an image.");
                                 }
-                            } catch (Exception ex) {
+                            } catch (Throwable ex) {
                                 Vars.ui.showException("Failed to paste image", ex);
                             }
-                        }).size(50, 50).padLeft(4).tooltip("Paste from clipboard");
+                        }).size(50, 50).padLeft(4).tooltip("Paste from clipboard").disabled(b -> exporting);
                     }
                 }).row();
                 img.table(info -> {
@@ -181,7 +174,7 @@ public class Main extends Mod {
 
                 tech.table(s -> {
                     s.add("Separate. Lines: ").left();
-                    s.field(String.valueOf(separateSpeed), str -> separateSpeed = Strings.parseInt(str, 109))
+                    s.field(String.valueOf(separateSpeed), str -> separateSpeed = Strings.parseInt(str, 100))
                             .width(100).get().setFilter(TextField.TextFieldFilter.digitsOnly);
                 }).row();
 
@@ -192,8 +185,8 @@ public class Main extends Mod {
 
             // --- СЕКЦИЯ 4: ВЫБОР ДИСПЛЕЯ ---
             t.table(Tex.buttonTrans, grid -> {
-                grid.add("[coral]5. Grid Size (Width x Height):[]").left().row();
-                if(coreDisplay.name.contains("tile")){
+                grid.add("[coral]4. Grid Size (Width x Height):[]").left().row();
+                if(Exporter.isTiledDisplay()){
                     grid.table(gt -> {
                         gt.label(() -> coreGridW + " x " + coreGridH).color(Color.gray).padRight(10).row();
                         gt.add("W: ");
@@ -212,13 +205,17 @@ public class Main extends Mod {
                 }
             }).row();
             t.table(Tex.buttonTrans, disp -> {
-                disp.add("[coral]4. Target Display:[]").left().row();
+                disp.add("[coral]5. Target Display:[]").left().row();
                 disp.button(coreDisplay.localizedName, () -> {
                     BaseDialog sel = new BaseDialog("Select Display");
                     Vars.content.blocks().each(b -> b instanceof LogicDisplay, b -> {
                         sel.cont.button(b.localizedName, () -> {
                             coreDisplay = (LogicDisplay) b;
                             coreSize = coreDisplay.displaySize;
+                            // У обычных дисплеев слайдер сетки до 10, у tile — до 16
+                            int maxGrid = Exporter.isTiledDisplay() ? 16 : 10;
+                            coreGridW = Math.min(coreGridW, maxGrid);
+                            coreGridH = Math.min(coreGridH, maxGrid);
                             sel.hide();
                             ptl.hide(); showMainDialog();
                         }).size(250, 60).row();
@@ -230,7 +227,7 @@ public class Main extends Mod {
 
             // --- СЕКЦИЯ 5: Настройки генерации ---
             t.table(Tex.buttonTrans, sc -> {
-                sc.add("[coral]5. Generation Settings:[]").left().row();
+                sc.add("[coral]6. Generation Settings:[]").left().row();
                 sc.label(() -> "centralDistLink: " + centralDistLink).color(Color.lightGray).row();
                 sc.slider(0, 15, 1, centralDistLink, n -> centralDistLink = (int)n).width(600f).row();
 
@@ -248,12 +245,10 @@ public class Main extends Mod {
 
             t.table(Tex.buttonTrans, sc -> {
                 sc.table(st ->{
-                    st.add("[coral]6. Some Things:[]").left().row();
-                    st.label(() -> "coreDOffset: " + coreDOffset).color(Color.lightGray).row();
-                    st.slider(-5, 5, 1, coreDOffset, n -> coreDOffset = (int)n).width(600f).row();
+                    st.add("[coral]7. Some Things:[]").left().row();
                     st.button("Delete all generated schemes", Exporter::showCleanupDialog).width(300f).row();
 
-                    st.check("Draw Display Borders(untested, plz, don`t touch this)", drawDisplayBorders, b -> {drawDisplayBorders = !drawDisplayBorders;}).left().row();
+                    st.check("Draw Display Borders (off = borderless, affects ALL displays)", drawDisplayBorders, b -> {drawDisplayBorders = b; Core.settings.put("pm-ddb", b);}).left().row();
 
                 });
             }).growX().row();
@@ -262,43 +257,27 @@ public class Main extends Mod {
 
         ptl.addCloseButton();
         ptl.buttons.button("EXPORT", Icon.export, () -> {
+            exporting = true;
+            Pixmap image = currentImage;
             Threads.daemon("PickMe worker", () -> {
                 try {
-                    Exporter.export(currentImage);
-                    Core.app.post(ptl::hide);
-                } catch (Exception ex) {
-                    Core.app.post(() -> { Vars.ui.showException(ex);});
+                    Schematic schem = Exporter.export(image);
+                    // Схемы, UI и GL — только из главного потока
+                    Core.app.post(() -> {
+                        exporting = false;
+                        ptl.hide();
+                        Exporter.useSchematic(schem);
+                    });
+                } catch (Throwable ex) {
+                    Core.app.post(() -> {
+                        exporting = false;
+                        Vars.ui.showException(ex);
+                    });
                 }
             });
-        }).size(180, 60).disabled(b -> currentImage == null);
+        }).size(180, 60).disabled(b -> currentImage == null || exporting);
 
         ptl.show();
-    }
-
-    // Конвертация системной картинки AWT в понятный игре Pixmap
-    private Pixmap awtToPixmap(java.awt.Image img) {
-        int w = img.getWidth(null);
-        int h = img.getHeight(null);
-
-        // Создаем BufferedImage для чтения пикселей
-        java.awt.image.BufferedImage bimg = new java.awt.image.BufferedImage(w, h, java.awt.image.BufferedImage.TYPE_INT_ARGB);
-        java.awt.Graphics2D g = bimg.createGraphics();
-        g.drawImage(img, 0, 0, null);
-        g.dispose();
-
-        Pixmap pix = new Pixmap(w, h);
-        for (int x = 0; x < w; x++) {
-            for (int y = 0; y < h; y++) {
-                int argb = bimg.getRGB(x, y);
-                // Переводим из формата AWT (ARGB) в формат Mindustry (RGBA8888)
-                int a = (argb >> 24) & 0xFF;
-                int r = (argb >> 16) & 0xFF;
-                int g_ = (argb >> 8) & 0xFF;
-                int b = argb & 0xFF;
-                pix.set(x, y, (r << 24) | (g_ << 16) | (b << 8) | a);
-            }
-        }
-        return pix;
     }
 
     private void testOverrideDisplay() {
@@ -308,43 +287,25 @@ public class Main extends Mod {
         for(Block b : displayBlocks){
             // Сохраняем ссылку на текущий блок, чтобы использовать её внутри анонимного класса
             LogicDisplay block = (LogicDisplay)b;
-            float scaleFactor = block.scaleFactor;
 
             block.buildType = () -> block.new LogicDisplayBuild() {
                 @Override
                 public void draw() {
-                    // 1. Проверяем настройку
-                    boolean drawBorder = drawDisplayBorders;
+                    // Рамки включены (по умолчанию) или дисплеи выключены в настройках игры —
+                    // ведём себя как ванильный дисплей
+                    if (drawDisplayBorders || !Vars.renderer.drawDisplays) {
+                        super.draw();
+                        return;
+                    }
 
-                    // 2. Рисуем рамку (ванильный спрайт), только если включено
-                    if (drawBorder) super.draw();
-
-                    // 3. Если сами дисплеи выключены в настройках игры — не рисуем содержимое
-                    if (!Vars.renderer.drawDisplays) return;
-
-                    // 4. Подготавливаем буфер (команды рисования процессора)
+                    // Безрамочный режим: без спрайта блока, содержимое растянуто на весь блок
                     Draw.draw(Draw.z(), this::ensureBuffer);
                     processCommands();
 
-                    // 5. Отрисовка содержимого на экране
                     Draw.blend(Blending.disabled);
                     Draw.draw(Draw.z(), () -> {
                         if (buffer != null) {
-                            float drawW, drawH;
-
-                            if (drawBorder) {
-                                // Ванильный расчет: используем scaleFactor блока
-                                drawW = buffer.getWidth() * scaleFactor * Draw.scl;
-                                drawH = -buffer.getHeight() * scaleFactor * Draw.scl;
-                            } else {
-                                // Безрамочный режим: растягиваем ровно на размер блока
-                                // block.size — это размер в тайлах (1, 2, 3...)
-                                // Vars.tilesize — это 8 единиц
-                                drawW = block.size * Vars.tilesize;
-                                drawH = -block.size * Vars.tilesize;
-                            }
-
-                            Draw.rect(Draw.wrap(buffer.getTexture()), x, y, drawW, drawH);
+                            Draw.rect(Draw.wrap(buffer.getTexture()), x, y, block.size * Vars.tilesize, -block.size * Vars.tilesize);
                         }
                     });
                     Draw.blend();
