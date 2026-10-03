@@ -146,7 +146,11 @@ public class Exporter {
 
         // 1. Сначала строим ОДНУ палитру на всю картинку
         Processor.Palette palette = Main.coreQuality < 255 ? Processor.buildGlobalPalette(fullPixmap) : null;
-        // 2. Генерируем код и ищем место для процессоров
+        // Код, которому не хватило места для микропроцессора в пределах его линка
+        Seq<FarCode> farCodes = new Seq<>();
+        int link = -Main.coreDisplay.sizeOffset;
+
+        // 2. Генерируем код и ищем место для микропроцессоров (вплотную к стене)
         for (DisplayInfo disp : displays) {
             int gx = disp.gx;
             int gy = disp.gy;
@@ -176,12 +180,24 @@ public class Exporter {
                 }
 
                 if (pos != null) {
-                    int link = -Main.coreDisplay.sizeOffset;
-                    addProcessor(pending, pos, dispX + link, dispY + link, code);
+                    addProcessor(pending, Blocks.microProcessor, pos, dispX + link, dispY + link, code);
                 } else {
-                    failedProcessors++;
-                    Log.warn("Не удалось разместить процессор для дисплея " + gx + "," + gy);
+                    farCodes.add(new FarCode(gx, gy, dispX, dispY, code));
                 }
+            }
+        }
+
+        // 3. Второй проход: что не дотянулось микропроцессорами — логическими (2x2, линк 22 клетки).
+        //    Идёт после всех микро, поэтому места у стены уже заняты ими, а логические встают за ними.
+        //    Так дальние (центральные) дисплеи больших стен тоже получают свои процессоры.
+        LogicBlock far = (LogicBlock) Blocks.logicProcessor;
+        for (FarCode fc : farCodes) {
+            Point pos = findFreeForBlock(far, fc.dispX, fc.dispY, dBlockSize);
+            if (pos != null) {
+                addProcessor(pending, far, pos, fc.dispX + link, fc.dispY + link, fc.code);
+            } else {
+                failedProcessors++;
+                Log.warn("Не удалось разместить процессор для дисплея " + fc.gx + "," + fc.gy);
             }
         }
     }
@@ -212,7 +228,7 @@ public class Exporter {
             }
 
             if (pos != null) {
-                addProcessor(pending, pos, Mathf.clamp(pos.x, 0, gridW - 1), Mathf.clamp(pos.y, 0, gridH - 1), code);
+                addProcessor(pending, Blocks.microProcessor, pos, Mathf.clamp(pos.x, 0, gridW - 1), Mathf.clamp(pos.y, 0, gridH - 1), code);
             } else {
                 failedProcessors++;
                 Log.warn("Не удалось разместить процессор для tile-дисплея");
@@ -221,16 +237,17 @@ public class Exporter {
     }
 
     private static boolean canPlaceTiled(int x, int y, int gridW, int gridH) {
-        return isFree(x, y) && inLinkRange(x, y, Mathf.clamp(x, 0, gridW - 1), Mathf.clamp(y, 0, gridH - 1), 1);
+        return isFree(x, y) && inLinkRange((LogicBlock) Blocks.microProcessor, x, y, Mathf.clamp(x, 0, gridW - 1), Mathf.clamp(y, 0, gridH - 1), 1);
     }
 
-    private static void addProcessor(Seq<PendingTile> pending, Point pos, int linkX, int linkY, String code) {
-        PendingTile pt = new PendingTile(Blocks.microProcessor, pos.x, pos.y, false);
+    // pos — левый нижний угол блока; в схему пишется позиция "центрального" тайла
+    private static void addProcessor(Seq<PendingTile> pending, Block block, Point pos, int linkX, int linkY, String code) {
+        PendingTile pt = new PendingTile(block, pos.x - block.sizeOffset, pos.y - block.sizeOffset, false);
         pt.code = code;
         pt.linkX = linkX;
         pt.linkY = linkY;
         pending.add(pt);
-        markOccupied(pos.x, pos.y, 1, 1, true);
+        markOccupied(pos.x, pos.y, block.size, block.size, true);
     }
 
     private static void creatDisplayGreed(int gridW, int gridH, int dBlockSize, Seq<PendingTile> pending) {
@@ -306,14 +323,46 @@ public class Exporter {
         return null;
     }
 
-    // sx, sy — левый нижний угол дисплея размером ds
-    private static boolean canPlace(int x, int y, int sx, int sy, int ds) {
-        return isFree(x, y) && inLinkRange(x, y, sx + (ds - 1) / 2f, sy + (ds - 1) / 2f, ds);
+    // Ближайшее к дисплею свободное место под процессор proc, до которого достаёт его линк.
+    // Возвращает левый нижний угол блока
+    private static Point findFreeForBlock(LogicBlock proc, int sx, int sy, int ds) {
+        int ps = proc.size;
+        float cx = sx + (ds - 1) / 2f, cy = sy + (ds - 1) / 2f;
+        int reach = (int)Math.ceil((proc.range + ds * Vars.tilesize / 2f) / Vars.tilesize) + ps;
+
+        Point best = null;
+        float bestDst = Float.MAX_VALUE;
+        for (int bx = (int)cx - reach; bx <= (int)cx + reach; bx++) {
+            for (int by = (int)cy - reach; by <= (int)cy + reach; by++) {
+                float px = bx + (ps - 1) / 2f, py = by + (ps - 1) / 2f;
+                float dst = Mathf.dst2(px, py, cx, cy);
+                if (dst >= bestDst || !inLinkRange(proc, px, py, cx, cy, ds) || !isFreeArea(bx, by, ps)) continue;
+
+                bestDst = dst;
+                best = new Point(bx, by);
+            }
+        }
+        return best;
     }
 
-    // Та же проверка, что в LogicBuild.validLink: иначе линк в игре молча отвалится
-    private static boolean inLinkRange(int x, int y, float targetX, float targetY, int targetSize) {
-        float range = ((LogicBlock) Blocks.microProcessor).range + targetSize * Vars.tilesize / 2f;
+    private static boolean isFreeArea(int x, int y, int size) {
+        for (int ix = x; ix < x + size; ix++) {
+            for (int iy = y; iy < y + size; iy++) {
+                if (!isFree(ix, iy)) return false;
+            }
+        }
+        return true;
+    }
+
+    // sx, sy — левый нижний угол дисплея размером ds
+    private static boolean canPlace(int x, int y, int sx, int sy, int ds) {
+        return isFree(x, y) && inLinkRange((LogicBlock) Blocks.microProcessor, x, y, sx + (ds - 1) / 2f, sy + (ds - 1) / 2f, ds);
+    }
+
+    // Та же проверка, что в LogicBuild.validLink: иначе линк в игре молча отвалится.
+    // x, y и target — центры блоков в клетках
+    private static boolean inLinkRange(LogicBlock proc, float x, float y, float targetX, float targetY, int targetSize) {
+        float range = proc.range + targetSize * Vars.tilesize / 2f;
         return Mathf.within(x * Vars.tilesize, y * Vars.tilesize, targetX * Vars.tilesize, targetY * Vars.tilesize, range - 0.5f);
     }
 
@@ -462,6 +511,13 @@ public class Exporter {
 
         PendingTile(Block b, int x, int y, boolean isDisplay) {
             this.block = b; this.x = x; this.y = y; this.isDisplay = isDisplay;
+        }
+    }
+    static class FarCode {
+        int gx, gy, dispX, dispY;
+        String code;
+        FarCode(int gx, int gy, int dispX, int dispY, String code) {
+            this.gx = gx; this.gy = gy; this.dispX = dispX; this.dispY = dispY; this.code = code;
         }
     }
     static class DisplayInfo {
