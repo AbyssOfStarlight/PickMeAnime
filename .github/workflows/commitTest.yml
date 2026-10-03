@@ -1,28 +1,84 @@
 name: Build Mod
 
-on: [push, pull_request]
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+  # Кнопка "Run workflow" на вкладке Actions
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Создать/обновить релиз (только для master/main)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
 
 jobs:
   buildJar:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Set up PATH
-      run: |
-        # Берём самую свежую установленную версию build-tools, а не захардкоженную
-        echo "$(ls -d ${ANDROID_HOME}/build-tools/* | sort -V | tail -n 1)" >> $GITHUB_PATH
-    - name: Set up JDK 17
-      uses: actions/setup-java@v4
-      with:
-        distribution: temurin
-        java-version: 17
-    - name: Build mod jar
-      run: |
-        chmod +x ./gradlew
-        ./gradlew deploy
-    - name: Upload built jar file
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ github.event.repository.name }}
-        path: build/libs/${{ github.event.repository.name }}.jar
+      - uses: actions/checkout@v4
+
+      - name: Set up PATH
+        run: |
+          # Берём самую свежую установленную версию build-tools, а не захардкоженную
+          echo "$(ls -d ${ANDROID_HOME}/build-tools/* | sort -V | tail -n 1)" >> $GITHUB_PATH
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Build mod jar
+        run: |
+          chmod +x ./gradlew
+          ./gradlew deploy
+
+      # --- ОПРЕДЕЛЕНИЕ ВЕРСИИ ---
+      - name: Extract version
+        id: get_version
+        run: |
+          # Строка вида "version: 1.2" в mod.hjson (без minGameVersion и комментариев)
+          VERSION=$(grep -E '^\s*"?version"?\s*:' mod.hjson | head -n 1 | sed -E 's/^[^:]*:\s*"?([0-9.]+).*/\1/')
+          if [ -z "$VERSION" ]; then
+            echo "::error::Не удалось найти version в mod.hjson"
+            exit 1
+          fi
+          echo "MOD_VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "Detected version: $VERSION"
+
+      # --- СОЗДАНИЕ/ОБНОВЛЕНИЕ РЕЛИЗА ---
+      # Не для pull request и не для чужих веток; при ручном запуске — если включена галочка
+      - name: Release or Update
+        if: >-
+          github.event_name != 'pull_request' &&
+          (github.ref_name == 'master' || github.ref_name == 'main') &&
+          (github.event_name != 'workflow_dispatch' || inputs.release)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.get_version.outputs.MOD_VERSION }}
+          JAR_PATH: build/libs/${{ github.event.repository.name }}.jar
+        run: |
+          TAG="v$VERSION"
+
+          # Проверяем, существует ли уже такой релиз
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Релиз $TAG уже есть. Перезаписываю файл..."
+            gh release upload "$TAG" "$JAR_PATH" --clobber
+          else
+            echo "Создаю новый релиз $TAG..."
+            gh release create "$TAG" "$JAR_PATH" \
+              --target "$GITHUB_SHA" \
+              --title "Release $TAG" \
+              --notes "Автоматическая сборка версии $VERSION"
+          fi
+
+      - name: Upload built jar file (Artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.repository.name }}
+          path: build/libs/${{ github.event.repository.name }}.jar
